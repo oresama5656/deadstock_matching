@@ -9,6 +9,7 @@ function App() {
   const [stores, setStores] = useState({});
   const [matches, setMatches] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef(null);
 
   // Normalize string for matching (remove spaces, full-width/half-width conversion)
@@ -287,67 +288,117 @@ function App() {
       {step === 1 && (
         <div className="card">
           <div
-            className={`drop-zone ${loading ? 'loading' : ''}`}
+            className={`drop-zone ${loading ? 'loading' : ''} ${isDragging ? 'dragging' : ''}`}
             onClick={() => fileInputRef.current.click()}
+            onDragEnter={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDragging(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDragging(false);
+            }}
             onDragOver={(e) => {
               e.preventDefault();
               e.stopPropagation();
+              e.dataTransfer.dropEffect = 'copy';
+              setIsDragging(true);
             }}
             onDrop={async (e) => {
               e.preventDefault();
               e.stopPropagation();
+              setIsDragging(false);
               setLoading(true);
 
-              const items = e.dataTransfer.items;
-              const files = [];
-              const scanFiles = async (entry) => {
-                if (entry.isFile) {
-                  return new Promise(resolve => entry.file(f => {
-                    // Attach webkitRelativePath for consistency with input[type=file]
-                    Object.defineProperty(f, 'webkitRelativePath', {
-                      value: entry.fullPath.substring(1), // Remove leading slash
-                      writable: false
-                    });
-                    files.push(f);
-                    resolve();
-                  }));
-                } else if (entry.isDirectory) {
-                  const reader = entry.createReader();
-                  const readEntries = () => new Promise(resolve => {
-                    reader.readEntries(async entries => {
-                      if (entries.length === 0) resolve();
-                      else {
-                        await Promise.all(entries.map(scanFiles));
-                        await readEntries();
+              try {
+                const items = e.dataTransfer.items;
+                const files = [];
+
+                // Helper to read entries recursively
+                const scanFiles = (entry) => {
+                  return new Promise((resolve) => {
+                    if (!entry) {
+                      resolve();
+                      return;
+                    }
+
+                    if (entry.isFile) {
+                      entry.file((f) => {
+                        const path = entry.fullPath ? entry.fullPath.substring(1) : f.name;
+                        Object.defineProperty(f, 'webkitRelativePath', {
+                          value: path,
+                          writable: false
+                        });
+                        files.push(f);
                         resolve();
-                      }
-                    });
+                      }, (err) => {
+                        console.warn("Failed to read file:", err);
+                        resolve();
+                      });
+                    } else if (entry.isDirectory) {
+                      const reader = entry.createReader();
+                      const readAllEntries = async () => {
+                        return new Promise((resEntries) => {
+                          reader.readEntries(async (entries) => {
+                            if (entries.length === 0) {
+                              resEntries();
+                            } else {
+                              await Promise.all(entries.map(scanFiles));
+                              await readAllEntries();
+                              resEntries();
+                            }
+                          }, (err) => {
+                            console.warn("Failed to read directory entries:", err);
+                            resEntries();
+                          });
+                        });
+                      };
+                      readAllEntries().then(resolve);
+                    } else {
+                      resolve();
+                    }
                   });
-                  await readEntries();
-                }
-              };
+                };
 
-              for (let i = 0; i < items.length; i++) {
-                const item = items[i];
-                if (item.webkitGetAsEntry) {
-                  const entry = item.webkitGetAsEntry();
-                  if (entry) await scanFiles(entry);
+                const promises = [];
+                if (items && items.length > 0) {
+                  for (let i = 0; i < items.length; i++) {
+                    const item = items[i];
+                    if (item.webkitGetAsEntry) {
+                      const entry = item.webkitGetAsEntry();
+                      if (entry) {
+                        promises.push(scanFiles(entry));
+                      }
+                    } else if (item.kind === 'file') {
+                      const f = item.getAsFile();
+                      if (f) files.push(f);
+                    }
+                  }
+                } else {
+                  const fileList = e.dataTransfer.files;
+                  for (let i = 0; i < fileList.length; i++) {
+                    files.push(fileList[i]);
+                  }
                 }
-              }
 
-              if (files.length > 0) {
-                // Reuse handleFolderUpload logic but with file list
-                // Create synthetic event-like object
-                const syntheticEvent = { target: { files: files } };
-                handleFolderUpload(syntheticEvent);
-              } else {
+                await Promise.all(promises);
+
+                if (files.length > 0) {
+                  const syntheticEvent = { target: { files: files } };
+                  await handleFolderUpload(syntheticEvent);
+                }
+              } catch (error) {
+                console.error("Drop error:", error);
+              } finally {
                 setLoading(false);
               }
             }}
           >
             <Upload size={48} color="var(--accent)" />
-            <h2>フォルダをドロップ</h2>
-            <p>クリックして選択、またはD&Dで追加（複数回可）</p>
+            <h2>フォルダを選択</h2>
+            <p>クリックして選択（複数回可）</p>
             <input
               type="file"
               multiple
@@ -381,7 +432,7 @@ function App() {
                   </li>
                 </ul>
               </li>
-              <li>この画面の枠内に店舗フォルダごとドラッグ＆ドロップしてください（またはクリックして選択）。</li>
+              <li>この画面の枠内をクリックして店舗フォルダを選択してください。</li>
               <li>全店舗の追加が終わったら「マッチング実行」ボタンを押してください。</li>
             </ol>
           </div>
